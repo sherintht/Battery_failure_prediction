@@ -10,6 +10,7 @@ try:
     import os
     import warnings
     import logging
+    from xgboost import XGBClassifier
 except ModuleNotFoundError as e:
     st.error(f"Missing required module: {str(e)}. Please ensure all dependencies are installed (see requirements.txt).")
     st.stop()
@@ -18,30 +19,43 @@ except ModuleNotFoundError as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Suppress warnings
+# Suppress warnings"D:\Battery_Failure_Prediction\models
 warnings.filterwarnings("ignore")
 
 # Define paths (relative for Streamlit Cloud)
-MODEL_DIR = "models"
-PREDICTIONS_DIR = "predictions"
+MODEL_DIR = "D:\Battery_Failure_Prediction\models"
+PREDICTIONS_DIR = "D:\Battery_Failure_Prediction\predictions"
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
-XGB_MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_model_tuned.joblib")
+XGB_MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_model_tuned.joblib")  # Try .joblib first
+XGB_JSON_PATH = os.path.join(MODEL_DIR, "xgboost_model_tuned.json")    # Fallback to .json
 SVM_MODEL_PATH = os.path.join(MODEL_DIR, "one_class_svm_model_tuned.joblib")
 LSTM_MODEL_PATH = os.path.join(MODEL_DIR, "lstm_model_tuned.h5")
 
 # Check if model and scaler files exist
-for path in [SCALER_PATH, XGB_MODEL_PATH, SVM_MODEL_PATH, LSTM_MODEL_PATH]:
+for path in [SCALER_PATH, SVM_MODEL_PATH, LSTM_MODEL_PATH]:
     if not os.path.exists(path):
         st.error(f"File not found: {path}. Please ensure all model and scaler files are in the {MODEL_DIR} directory.")
         logger.error(f"File not found: {path}")
         st.stop()
 
+# Check for XGBoost model
+xgb_path = XGB_MODEL_PATH if os.path.exists(XGB_MODEL_PATH) else XGB_JSON_PATH
+if not os.path.exists(xgb_path):
+    st.error(f"XGBoost model not found at {XGB_MODEL_PATH} or {XGB_JSON_PATH}. Please provide the model file.")
+    logger.error(f"XGBoost model not found")
+    st.stop()
+
 # Load models and scaler
 try:
     scaler = joblib.load(SCALER_PATH)
-    xgb_model = joblib.load(XGB_MODEL_PATH)
     svm_model = joblib.load(SVM_MODEL_PATH)
     lstm_model = keras.models.load_model(LSTM_MODEL_PATH)
+    # Load XGBoost model
+    if xgb_path.endswith(".json"):
+        xgb_model = XGBClassifier()
+        xgb_model.load_model(xgb_path)
+    else:
+        xgb_model = joblib.load(xgb_path)
     logger.info("Models and scaler loaded successfully.")
 except Exception as e:
     st.error(f"Error loading models or scaler: {str(e)}")
