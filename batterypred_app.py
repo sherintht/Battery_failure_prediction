@@ -1,14 +1,18 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import tensorflow.keras as keras
-from sklearn.preprocessing import MinMaxScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
-import os
-import warnings
-import logging
+try:
+    import pandas as pd
+    import numpy as np
+    import joblib
+    import tensorflow.keras as keras
+    from sklearn.preprocessing import MinMaxScaler
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import os
+    import warnings
+    import logging
+except ModuleNotFoundError as e:
+    st.error(f"Missing required module: {str(e)}. Please ensure all dependencies are installed (see requirements.txt).")
+    st.stop()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -17,18 +21,19 @@ logger = logging.getLogger(__name__)
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Define paths
-MODEL_DIR = "D:/Battery_Failure_Prediction/models"
+# Define paths (relative for Streamlit Cloud)
+MODEL_DIR = "models"
+PREDICTIONS_DIR = "predictions"
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
-XGB_MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_model_tuned.joblib")  # Changed to .joblib
+XGB_MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_model_tuned.joblib")
 SVM_MODEL_PATH = os.path.join(MODEL_DIR, "one_class_svm_model_tuned.joblib")
 LSTM_MODEL_PATH = os.path.join(MODEL_DIR, "lstm_model_tuned.h5")
-PREDICTIONS_DIR = "D:/Battery_Failure_Prediction/predictions"
 
 # Check if model and scaler files exist
 for path in [SCALER_PATH, XGB_MODEL_PATH, SVM_MODEL_PATH, LSTM_MODEL_PATH]:
     if not os.path.exists(path):
-        st.error(f"File not found: {path}. Please ensure all model and scaler files are in {MODEL_DIR}.")
+        st.error(f"File not found: {path}. Please ensure all model and scaler files are in the {MODEL_DIR} directory.")
+        logger.error(f"File not found: {path}")
         st.stop()
 
 # Load models and scaler
@@ -189,7 +194,7 @@ if input_method == "Enter Details":
             # XGBoost prediction
             try:
                 xgb_prob = xgb_model.predict_proba(scaled_data)[:, 1][0]
-                xgb_pred = 1 if xgb_prob > 0.5 else 0
+                xgb_pred = 1 if xgb_prob >= 0.5 else 0
             except Exception as e:
                 st.error(f"Error with XGBoost prediction: {str(e)}")
                 logger.error(f"Error with XGBoost prediction: {str(e)}")
@@ -211,7 +216,7 @@ if input_method == "Enter Details":
                 if lstm_seq is None:
                     st.stop()
                 lstm_prob = lstm_model.predict(lstm_seq, verbose=0)[0][0]
-                lstm_pred = 1 if lstm_prob > 0.2 else 0
+                lstm_pred = 1 if lstm_prob >= 0.2 else 0
             except Exception as e:
                 st.error(f"Error with LSTM prediction: {str(e)}")
                 logger.error(f"Error with LSTM prediction: {str(e)}")
@@ -219,7 +224,7 @@ if input_method == "Enter Details":
             
             # Ensemble prediction
             ensemble_prob = 0.5 * lstm_prob + 0.3 * xgb_prob + 0.2 * svm_prob
-            ensemble_pred = 1 if ensemble_prob > 0.5 else 0
+            ensemble_pred = 1 if ensemble_prob >= 0.5 else 0
             
             # Display results
             st.header("Battery Health Report")
@@ -296,7 +301,7 @@ else:
                 
                 # Predictions
                 xgb_prob = xgb_model.predict_proba(scaled_data)[:, 1]
-                xgb_pred = (xgb_prob > 0.5).astype(int)
+                xgb_pred = (xgb_prob >= 0.5).astype(int)
                 
                 svm_pred = svm_model.predict(scaled_data)
                 svm_pred = np.where(svm_pred == -1, 1, 0)
@@ -310,7 +315,7 @@ else:
                         st.stop()
                     lstm_prob.append(lstm_model.predict(seq, verbose=0)[0][0])
                 lstm_prob = np.array(lstm_prob)
-                lstm_pred = (lstm_prob > 0.2).astype(int)
+                lstm_pred = (lstm_prob >= 0.2).astype(int)
                 
                 # Pad LSTM predictions
                 lstm_prob = np.pad(lstm_prob, (sequence_length - 1, 0), mode='constant', constant_values=0)
@@ -318,7 +323,7 @@ else:
                 
                 # Ensemble predictions
                 ensemble_prob = 0.5 * lstm_prob + 0.3 * xgb_prob + 0.2 * svm_prob
-                ensemble_pred = (ensemble_prob > 0.5).astype(int)
+                ensemble_pred = (ensemble_prob >= 0.5).astype(int)
                 
                 # Results DataFrame
                 result_df = pd.DataFrame({
@@ -372,5 +377,5 @@ st.markdown("""
 - **Enter Details**: Provide the battery’s capacity (mAh), voltage, age (months), and charge frequency (e.g., 3 times per week). Leave optional fields as default if unknown.
 - **Upload CSV**: Use a CSV with columns: capacity_mah, voltage, battery_age_months, charge_frequency, temperature. Optional: current, time, internal_resistance.
 - **Output**: View the battery’s health (SOH), failure risk, and estimated remaining cycles. Download the report as a CSV.
-- **Troubleshooting**: Ensure all model files and scaler.joblib are in D:/Battery_Failure_Prediction/models/. Check the terminal for error messages if no output appears.
+- **Troubleshooting**: Ensure all model files and scaler.joblib are in the models/ directory. Check Streamlit Cloud logs (Manage app > Logs) for errors.
 """)
