@@ -1,236 +1,265 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from pathlib import Path
-import sys
+import joblib
+import tensorflow.keras as keras
+from sklearn.preprocessing import MinMaxScaler
+import matplotlib.pyplot as plt
+import seaborn as sns
 import os
+import warnings
+warnings.filterwarnings("ignore")
 
-# Add utils to path
-sys.path.append('utils')
+# Define paths
+MODEL_DIR = "D:/Battery_Failure_Prediction/models"
+SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
+XGB_MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_model_tuned.json")
+SVM_MODEL_PATH = os.path.join(MODEL_DIR, "one_class_svm_model_tuned.joblib")
+LSTM_MODEL_PATH = os.path.join(MODEL_DIR, "lstm_model_tuned.h5")
+PREDICTIONS_DIR = "D:/Battery_Failure_Prediction/predictions"
 
-# Page configuration
-st.set_page_config(
-    page_title="Battery Failure Prediction Dashboard",
-    page_icon="🔋",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Load models and scaler
+try:
+    scaler = joblib.load(SCALER_PATH)
+    xgb_model = joblib.load(XGB_MODEL_PATH)
+    svm_model = joblib.load(SVM_MODEL_PATH)
+    lstm_model = keras.models.load_model(LSTM_MODEL_PATH)
+except Exception as e:
+    st.error(f"Error loading models or scaler: {str(e)}")
+    st.stop()
 
-# Custom CSS for better styling
+# Streamlit app
+st.title("Battery Life Predictor")
 st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem;
-        border-radius: 0.5rem;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border: 1px solid #e0e0e0;
-    }
-    .sidebar-info {
-        background: #e8f4fd;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-        margin-bottom: 1rem;
-    }
-</style>
-""", unsafe_allow_html=True)
+This app helps you check your battery’s health and predict potential failures. Enter simple details like the battery’s capacity (mAh), voltage, and how often you charge it. You can also upload a CSV file for advanced analysis.
+""")
 
-# Main header
+# Sidebar for input selection
+st.sidebar.header("Choose Input Method")
+input_method = st.sidebar.radio("Select how to provide battery data:", ("Enter Details", "Upload CSV"))
+
+# Features for prediction
+features = ['cycle', 'voltage', 'current', 'temperature', 'capacity', 'time', 'internal_resistance']
+sequence_length = 20
+
+# Function to preprocess input data
+def preprocess_input(data, scaler, is_manual=False):
+    if is_manual:
+        # Convert mAh to Ah
+        data['capacity'] = data['capacity_mah'] / 1000.0
+        # Calculate SOC and SOH
+        data['soc'] = (data['voltage'] - 3.0) / (4.2 - 3.0)
+        data['soc'] = np.clip(data['soc'], 0, 1)
+        data['soh'] = (data['capacity'] / 2.0) * 100  # Assume 2.0 Ah initial capacity
+        # Estimate cycle from usage
+        data['cycle'] = (data['battery_age_months'] / 12) * 52 * data['charge_frequency']
+        data_df = pd.DataFrame([data])[features]
+    else:
+        data_df = data[features].copy()
+        # Convert mAh to Ah if provided
+        if 'capacity_mah' in data_df.columns:
+            data_df['capacity'] = data_df['capacity_mah'] / 1000.0
+        # Calculate SOC and SOH if not provided
+        if 'soc' not in data_df.columns:
+            data_df['soc'] = (data_df['voltage'] - 3.0) / (4.2 - 3.0)
+            data_df['soc'] = np.clip(data_df['soc'], 0, 1)
+        if 'soh' not in data_df.columns:
+            data_df['soh'] = (data_df['capacity'] / 2.0) * 100
+    
+    # Scale features
+    scaled_data = scaler.transform(data_df[features])
+    return scaled_data, data_df
+
+# Function to create LSTM sequences
+def create_lstm_sequences(data, sequence_length):
+    if len(data) < sequence_length:
+        # Pad with repeated input for single data points
+        data = np.repeat(data, sequence_length, axis=0)
+    return np.array([data[-sequence_length:]])
+
+# Manual input form
+if input_method == "Enter Details":
+    st.header("Enter Battery Details")
+    with st.form("manual_input_form"):
+        st.markdown("**Provide the following details about your battery:**")
+        capacity_mah = st.number_input("Battery Capacity (mAh)", min_value=100.0, max_value=5000.0, value=2000.0, help="Check the battery label for rated capacity, e.g., 2000 mAh.")
+        voltage = st.number_input("Voltage (V)", min_value=2.0, max_value=5.0, value=3.7, help="Enter the current or nominal voltage, typically 3.7V for lithium-ion batteries.")
+        battery_age_months = st.number_input("Battery Age (Months)", min_value=0.0, max_value=120.0, value=12.0, help="How many months since you started using the battery?")
+        charge_frequency = st.number_input("Charges per Week", min_value=0.0, max_value=20.0, value=3.0, help="How many times do you charge the battery per week?")
+        ambient_temperature = st.selectbox("Ambient Temperature (°C)", [4, 24, 30], index=1, help="Select the typical operating temperature (e.g., 24°C for room temperature).")
+        
+        # Optional advanced inputs
+        st.markdown("**Optional (Leave as default if unknown):**")
+        current = st.number_input("Current (A)", min_value=-5.0, max_value=5.0, value=-1.0, help="Average discharge current; default is -1.0A.")
+        time = st.number_input("Discharge Time (Hours)", min_value=0.0, max_value=10.0, value=1.0, help="Time to discharge the battery; default is 1 hour.")
+        internal_resistance = st.number_input("Internal Resistance (Ohms)", min_value=0.0, max_value=1.0, value=0.1, help="Battery resistance; default is 0.1 Ohms.")
+        
+        submit = st.form_submit_button("Check Battery Health")
+
+        if submit:
+            input_data = {
+                'capacity_mah': capacity_mah,
+                'voltage': voltage,
+                'battery_age_months': battery_age_months,
+                'charge_frequency': charge_frequency,
+                'temperature': ambient_temperature,
+                'current': current,
+                'time': time * 3600,  # Convert hours to seconds
+                'internal_resistance': internal_resistance
+            }
+            scaled_data, input_df = preprocess_input(input_data, scaler, is_manual=True)
+            
+            # XGBoost prediction
+            xgb_prob = xgb_model.predict_proba(scaled_data)[:, 1][0]
+            xgb_pred = 1 if xgb_prob > 0.5 else 0
+            
+            # One-Class SVM prediction
+            svm_pred = svm_model.predict(scaled_data)[0]
+            svm_pred = 1 if svm_pred == -1 else 0
+            svm_prob = 0.9 if svm_pred == 1 else 0.1
+            
+            # LSTM prediction
+            lstm_seq = create_lstm_sequences(scaled_data, sequence_length)
+            lstm_prob = lstm_model.predict(lstm_seq)[0][0]
+            lstm_pred = 1 if lstm_prob > 0.2 else 0
+            
+            # Ensemble prediction
+            ensemble_prob = 0.5 * lstm_prob + 0.3 * xgb_prob + 0.2 * svm_prob
+            ensemble_pred = 1 if ensemble_prob > 0.5 else 0
+            
+            # Display results
+            st.header("Battery Health Report")
+            st.write(f"**Battery Health (SOH):** {input_df['soh'].iloc[0]:.2f}% (Healthy if >70%)")
+            st.write(f"**Failure Risk:** {ensemble_prob:.2%} (Low if <50%)")
+            st.write(f"**Status:** {'⚠️ Needs Replacement' if ensemble_pred == 1 else '✅ Healthy'}")
+            
+            # Estimate remaining cycles
+            capacity_ah = input_data['capacity_mah'] / 1000.0
+            estimated_cycles = input_df['cycle'].iloc[0]
+            remaining_cycles = max(0, int((capacity_ah - 1.4) / 0.01))  # Rough estimate
+            st.write(f"**Estimated Cycles Completed:** ~{int(estimated_cycles)}")
+            st.write(f"**Estimated Remaining Cycles:** ~{remaining_cycles}")
+            
+            # Visualization: SOH Gauge
+            st.header("Battery Health Visualization")
+            fig, ax = plt.subplots()
+            ax.bar(['Battery Health (SOH)'], [input_df['soh'].iloc[0] / 100], color='green' if input_df['soh'].iloc[0] > 70 else 'red')
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("State of Health (%)")
+            st.pyplot(fig)
+            
+            # Visualization: Failure Probability
+            fig, ax = plt.subplots()
+            ax.bar(['Failure Risk'], [ensemble_prob], color='orange' if ensemble_prob < 0.5 else 'red')
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Probability of Failure")
+            st.pyplot(fig)
+            
+            # Save prediction
+            result_df = pd.DataFrame({
+                'estimated_cycles': [int(estimated_cycles)],
+                'battery_id': ['User Input'],
+                'actual_failure': [None],
+                'ensemble_predicted_failure': [ensemble_pred],
+                'ensemble_prob': [ensemble_prob],
+                'soh': [input_df['soh'].iloc[0]]
+            })
+            result_df.to_csv(os.path.join(PREDICTIONS_DIR, "manual_prediction.csv"), index=False)
+            st.download_button(
+                label="Download Report",
+                data=result_df.to_csv(index=False).encode('utf-8'),
+                file_name="battery_health_report.csv",
+                mime="text/csv"
+            )
+
+# File upload
+else:
+    st.header("Upload Battery Data (CSV)")
+    st.markdown("Upload a CSV with columns: capacity_mah, voltage, battery_age_months, charge_frequency, temperature, (optional: current, time, internal_resistance).")
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        required_columns = ['capacity_mah', 'voltage', 'battery_age_months', 'charge_frequency', 'temperature']
+        if not all(col in df.columns for col in required_columns):
+            st.error(f"CSV must contain columns: {', '.join(required_columns)}")
+        else:
+            # Add default values for optional columns
+            for col, default in [('current', -1.0), ('time', 3600.0), ('internal_resistance', 0.1)]:
+                if col not in df.columns:
+                    df[col] = default
+            
+            scaled_data, input_df = preprocess_input(df, scaler)
+            
+            # Predictions
+            xgb_prob = xgb_model.predict_proba(scaled_data)[:, 1]
+            xgb_pred = (xgb_prob > 0.5).astype(int)
+            
+            svm_pred = svm_model.predict(scaled_data)
+            svm_pred = np.where(svm_pred == -1, 1, 0)
+            svm_prob = np.where(svm_pred == 1, 0.9, 0.1)
+            
+            # LSTM predictions
+            lstm_prob = []
+            for i in range(len(scaled_data) - sequence_length + 1):
+                seq = create_lstm_sequences(scaled_data[i:i+sequence_length], sequence_length)
+                lstm_prob.append(lstm_model.predict(seq)[0][0])
+            lstm_prob = np.array(lstm_prob)
+            lstm_pred = (lstm_prob > 0.2).astype(int)
+            
+            # Pad LSTM predictions
+            lstm_prob = np.pad(lstm_prob, (sequence_length - 1, 0), mode='constant', constant_values=0)
+            lstm_pred = np.pad(lstm_pred, (sequence_length - 1, 0), mode='constant', constant_values=0)
+            
+            # Ensemble predictions
+            ensemble_prob = 0.5 * lstm_prob + 0.3 * xgb_prob + 0.2 * svm_prob
+            ensemble_pred = (ensemble_prob > 0.5).astype(int)
+            
+            # Results DataFrame
+            result_df = pd.DataFrame({
+                'estimated_cycles': input_df['cycle'],
+                'battery_id': df.get('battery_id', ['Unknown'] * len(df)),
+                'actual_failure': df.get('failure', [None] * len(df)),
+                'ensemble_predicted_failure': ensemble_pred,
+                'ensemble_prob': ensemble_prob,
+                'soh': input_df['soh']
+            })
+            
+            # Display results
+            st.header("Battery Health Report")
+            st.dataframe(result_df)
+            
+            # Visualizations
+            st.header("Visualizations")
+            fig, ax = plt.subplots()
+            sns.lineplot(data=input_df, x='cycle', y='soh', hue='battery_id', ax=ax)
+            ax.set_title("Battery Health (SOH) Over Cycles")
+            ax.set_xlabel("Estimated Cycles")
+            ax.set_ylabel("State of Health (%)")
+            st.pyplot(fig)
+            
+            fig, ax = plt.subplots()
+            sns.scatterplot(data=input_df, x='soh', y='internal_resistance', hue=ensemble_pred, size=ensemble_pred, ax=ax)
+            ax.set_title("Internal Resistance vs. SOH")
+            ax.set_xlabel("State of Health (%)")
+            ax.set_ylabel("Internal Resistance (Ohms)")
+            st.pyplot(fig)
+            
+            # Download results
+            st.download_button(
+                label="Download Report",
+                data=result_df.to_csv(index=False).encode('utf-8'),
+                file_name="battery_health_report.csv",
+                mime="text/csv"
+            )
+            
+            # Save predictions
+            result_df.to_csv(os.path.join(PREDICTIONS_DIR, "uploaded_predictions.csv"), index=False)
+
+# Instructions
 st.markdown("""
-<div class="main-header">
-    <h1>🔋 Battery Failure Prediction Dashboard</h1>
-    <p>Advanced ML-powered battery health monitoring and failure prediction system</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Sidebar navigation
-st.sidebar.markdown("""
-<div class="sidebar-info">
-    <h3>📊 Dashboard Navigation</h3>
-    <p>Explore different aspects of battery failure prediction using ensemble ML models.</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Navigation
-page = st.sidebar.selectbox(
-    "Choose a page:",
-    ["🏠 Home", "📊 Data Exploration", "🎯 Model Performance", "🔮 Prediction", "📈 Battery Monitoring"]
-)
-
-# Main content area
-if page == "🏠 Home":
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.header("🔬 Project Overview")
-        st.markdown("""
-        This dashboard showcases an advanced battery failure prediction system using NASA battery dataset 
-        and ensemble machine learning models. The system combines three powerful approaches:
-        
-        **🤖 Machine Learning Models:**
-        - **XGBoost Classifier**: Gradient boosting for robust classification
-        - **LSTM Neural Network**: Sequential pattern recognition for time-series data
-        - **One-Class SVM**: Anomaly detection for failure outliers
-        
-        **📈 Key Features:**
-        - Real-time battery health monitoring (SOC/SOH)
-        - Interactive data exploration and visualization
-        - Model performance comparison and analysis
-        - Predictive analytics for failure forecasting
-        - Feature importance analysis
-        """)
-        
-        st.header("🔋 Battery Dataset Information")
-        st.markdown("""
-        **NASA Battery Dataset Features:**
-        - **Cycle**: Charge/discharge cycle number
-        - **Voltage**: Battery terminal voltage (V)
-        - **Current**: Charge/discharge current (A)
-        - **Temperature**: Operating temperature (°C)
-        - **Capacity**: Available battery capacity (Ah)
-        - **Time**: Cycle duration (seconds)
-        - **Internal Resistance**: Calculated resistance (Ω)
-        - **SOC**: State of Charge (%)
-        - **SOH**: State of Health (%)
-        """)
-    
-    with col2:
-        st.header("📊 Quick Stats")
-        
-        # Display some quick statistics
-        try:
-            from utils.data_loader import load_battery_data
-            data = load_battery_data()
-            if data is not None:
-                st.metric("Total Records", f"{len(data):,}")
-                st.metric("Battery Units", len(data['battery_id'].unique()) if 'battery_id' in data.columns else "N/A")
-                st.metric("Features", len(data.columns) - 1 if 'failure' in data.columns else len(data.columns))
-                
-                failure_rate = (data['failure'].sum() / len(data) * 100) if 'failure' in data.columns else 0
-                st.metric("Failure Rate", f"{failure_rate:.1f}%")
-        except Exception as e:
-            st.error("Unable to load dataset statistics")
-            st.info("Please upload the NASA battery dataset using the data upload section below.")
-        
-        st.header("🚀 Getting Started")
-        st.markdown("""
-        1. **📊 Data Exploration**: Analyze battery degradation patterns
-        2. **🎯 Model Performance**: Compare ensemble model results
-        3. **🔮 Prediction**: Make predictions on new battery data
-        4. **📈 Battery Monitoring**: Monitor real-time battery health
-        """)
-        
-        st.header("ℹ️ About the Models")
-        st.info("""
-        **Ensemble Approach**: Combines predictions from multiple models:
-        - 50% LSTM (temporal patterns)
-        - 30% XGBoost (feature relationships)
-        - 20% One-Class SVM (anomaly detection)
-        """)
-
-    # Data Upload Section
-    st.header("📁 NASA Battery Dataset Upload")
-    st.markdown("Upload the actual NASA battery dataset for full functionality.")
-
-    with st.expander("📤 Upload Dataset", expanded=False):
-        uploaded_file = st.file_uploader(
-            "Choose the NASA battery dataset CSV file",
-            type="csv",
-            help="Upload the nasa_battery_data_combined.csv file generated from the NASA battery .mat files"
-        )
-        
-        if uploaded_file is not None:
-            try:
-                # Save the uploaded file
-                with open("nasa_battery_data_combined.csv", "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                
-                st.success("Dataset uploaded successfully! Please refresh the page to load the new data.")
-                
-                # Show preview of uploaded data
-                uploaded_data = pd.read_csv(uploaded_file)
-                st.write("**Data Preview:**")
-                st.dataframe(uploaded_data.head())
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Records", f"{len(uploaded_data):,}")
-                with col2:
-                    st.metric("Features", len(uploaded_data.columns))
-                with col3:
-                    if 'failure' in uploaded_data.columns:
-                        failure_rate = (uploaded_data['failure'].sum() / len(uploaded_data) * 100)
-                        st.metric("Failure Rate", f"{failure_rate:.1f}%")
-                    
-            except Exception as e:
-                st.error(f"Error uploading file: {str(e)}")
-        
-        st.markdown("""
-        **Expected CSV format should include these columns:**
-        - battery_id, cycle, voltage, current, temperature, capacity, time, internal_resistance, SOC, SOH, failure
-        """)
-
-    # Model Upload Section  
-    st.header("🤖 Pre-trained Models Upload")
-    st.markdown("Upload pre-trained models for enhanced prediction capabilities.")
-
-    with st.expander("📤 Upload Models", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.write("**XGBoost Model**")
-            xgb_file = st.file_uploader("XGBoost model (.json)", type="json", key="xgb")
-            if xgb_file:
-                with open("xgboost_model_tuned.json", "wb") as f:
-                    f.write(xgb_file.getbuffer())
-                st.success("XGBoost model uploaded!")
-        
-        with col2:
-            st.write("**LSTM Model**")
-            lstm_file = st.file_uploader("LSTM model (.h5)", type="h5", key="lstm")
-            if lstm_file:
-                with open("lstm_model_tuned.h5", "wb") as f:
-                    f.write(lstm_file.getbuffer())
-                st.success("LSTM model uploaded!")
-        
-        with col3:
-            st.write("**SVM Model**")
-            svm_file = st.file_uploader("SVM model (.joblib)", type="joblib", key="svm")
-            if svm_file:
-                with open("one_class_svm_model_tuned.joblib", "wb") as f:
-                    f.write(svm_file.getbuffer())
-                st.success("SVM model uploaded!")
-
-elif page == "📊 Data Exploration":
-    from pages.data_exploration import show_data_exploration
-    show_data_exploration()
-
-elif page == "🎯 Model Performance":
-    from pages.model_performance import show_model_performance
-    show_model_performance()
-
-elif page == "🔮 Prediction":
-    from pages.prediction import show_prediction
-    show_prediction()
-
-elif page == "📈 Battery Monitoring":
-    from pages.battery_monitoring import show_battery_monitoring
-    show_battery_monitoring()
-
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.markdown("""
-<div style="text-align: center; color: #666;">
-    <p><strong>Battery Failure Prediction System</strong></p>
-    <p>Powered by Ensemble ML Models</p>
-</div>
-""", unsafe_allow_html=True)
-
+### Instructions
+- **Enter Details**: Provide the battery’s capacity (mAh), voltage, age, and charge frequency. Leave optional fields as default if unknown.
+- **Upload CSV**: Use a CSV with columns for capacity (mAh), voltage, battery age (months), charge frequency, and temperature. Optional: current, time, internal_resistance.
+- **Output**: View the battery’s health (SOH), failure risk, and estimated remaining cycles. Download the report as a CSV.
+""")
